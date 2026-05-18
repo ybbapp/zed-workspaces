@@ -57,9 +57,9 @@ When opening a directory, it looks for `.zed-workspace` files directly inside th
 Install Zed tasks:
 
 ```sh
-zed-workspaces install-tasks
+zed-workspaces install
 ```
 
-This adds or updates the bundled `zed-workspaces` tasks in your user-level Zed `tasks.json`.
+This adds or updates the bundled `zed-workspaces` tasks and JSONC file associations in your user-level Zed config.
 
 To save edited generated settings/debug files back into the workspace, open `.zed-workspace/.zed/settings.json` or `debug.json` and run the installed `zed-workspaces: update workspace from settings` task.

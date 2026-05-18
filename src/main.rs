@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
+use jsonc_parser::cst::{CstArray, CstInputValue, CstNode, CstObject, CstRootNode};
+use jsonc_parser::{parse_to_value, JsonValue};
 use pico_args::Arguments;
-use serde_json::json;
 use std::{
     env,
     fs,
@@ -9,19 +10,28 @@ use std::{
     process::Command,
 };
 
-const HELP: &str = r#"zed-workspaces 0.1.0
+const HELP: &str = r#"zed-workspaces
 
 A small CLI to create and open .zed-workspace/.code-workspace files in Zed.
 
 USAGE:
   zed-workspaces create [--name NAME] [DIRS...]
-  zed-workspaces open [--reuse] [FILE]
-  zed-workspaces install-tasks
-  zed-workspaces update-from-settings FILE
-  zed-workspaces --help
+    Create NAME.zed-workspace with DIRS...
+    If no DIRS provided, prompts from directories in the current directory.
 
-If create gets no DIRS, it prompts from directories in the current directory.
-If open gets no FILE, it behaves like `open .`.
+  zed-workspaces open [--reuse] [FILE_OR_DIR]
+    If no FILE_OR_DIR, it behaves like `open .`
+
+  zed-workspaces install
+    Install tasks and associate .zed-workspace files in your user-level zed settings.
+
+  zed-workspaces update-from-settings FILE
+    Updates a .zed-workspace file from decomposed .zed-workspace/.zed/[settings_file].json.
+    Mostly intended for use by the associated Zed task, not directly.
+
+  zed-workspaces --help
+    Print this help text
+
 "#;
 
 const ZED_WORKSPACE_SCHEMA: &str =
@@ -38,7 +48,7 @@ fn main() -> Result<()> {
     match command.as_str() {
         "create" => create_workspace(args),
         "open" => open_workspace(args),
-        "install-tasks" => install_tasks(),
+        "install" => install(),
         "update-from-settings" => update_from_settings(args),
         other => bail!("unknown command {other:?}\n\n{HELP}"),
     }
@@ -72,48 +82,38 @@ fn update_from_settings(mut args: Arguments) -> Result<()> {
 
     let text = fs::read_to_string(&workspace_file)
         .with_context(|| format!("failed to read {}", workspace_file.display()))?;
-    let mut workspace: serde_json::Value = json5::from_str(&text)
-        .with_context(|| format!("invalid JSON/JSON5 in {}", workspace_file.display()))?;
+    let root = CstRootNode::parse(&text, &Default::default())
+        .with_context(|| format!("invalid JSONC in {}", workspace_file.display()))?;
+    let object = root.object_value_or_set();
 
-    let old_object = workspace
-        .as_object()
-        .ok_or_else(|| anyhow!("{} must contain a JSON object", workspace_file.display()))?;
-
-    let mut object = serde_json::Map::new();
-    object.insert("$schema".to_string(), json!(ZED_WORKSPACE_SCHEMA));
-    for (key, value) in old_object {
-        if key != "$schema" {
-            object.insert(key.clone(), value.clone());
-        }
+    if let Some(schema) = object.get("$schema") {
+        schema.set_value(CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string()));
+    } else {
+        object.insert(0, "$schema", CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string()));
     }
 
     let settings_file = zed_dir.join("settings.json");
     if settings_file.exists() {
         let settings_text = fs::read_to_string(&settings_file)
             .with_context(|| format!("failed to read {}", settings_file.display()))?;
-        let settings: serde_json::Value = json5::from_str(&settings_text)
-            .with_context(|| format!("invalid JSON/JSON5 in {}", settings_file.display()))?;
-        object.insert("settings".to_string(), settings);
+        let settings = parse_jsonc(&settings_text)
+            .with_context(|| format!("invalid JSONC in {}", settings_file.display()))?;
+        set_or_append_property(&object, "settings", settings);
     }
 
     let debug_file = zed_dir.join("debug.json");
     if debug_file.exists() {
         let debug_text = fs::read_to_string(&debug_file)
             .with_context(|| format!("failed to read {}", debug_file.display()))?;
-        let debug: serde_json::Value = json5::from_str(&debug_text)
-            .with_context(|| format!("invalid JSON/JSON5 in {}", debug_file.display()))?;
-        if !debug.is_array() {
+        let debug = parse_jsonc(&debug_text)
+            .with_context(|| format!("invalid JSONC in {}", debug_file.display()))?;
+        if !matches!(debug, JsonValue::Array(_)) {
             bail!("{} must contain a JSON array", debug_file.display());
         }
-        object.insert("debug".to_string(), debug);
+        set_or_append_property(&object, "debug", debug);
     }
 
-    workspace = serde_json::Value::Object(object);
-
-    fs::write(
-        &workspace_file,
-        format!("{}\n", serde_json::to_string_pretty(&workspace)?),
-    )
+    fs::write(&workspace_file, root.to_string())
     .with_context(|| format!("failed to write {}", workspace_file.display()))?;
 
     println!("Updated {}", workspace_file.display());
@@ -136,55 +136,114 @@ fn find_single_zed_workspace_in_dir(dir: &Path) -> Result<PathBuf> {
     }
 }
 
-fn install_tasks() -> Result<()> {
+fn install() -> Result<()> {
     let settings_file = find_zed_settings_file()?;
     let zed_config_dir = settings_file
         .parent()
         .ok_or_else(|| anyhow!("invalid Zed settings path: {}", settings_file.display()))?;
     let tasks_file = zed_config_dir.join("tasks.json");
 
-    let wanted: serde_json::Value = serde_json::from_str(include_str!("../resources/tasks.json"))
+    let wanted = parse_jsonc(include_str!("../resources/tasks.json"))
         .context("bundled resources/tasks.json is invalid")?;
-    let wanted_tasks = wanted
-        .as_array()
-        .ok_or_else(|| anyhow!("bundled resources/tasks.json must contain an array"))?;
-
-    let mut current = if tasks_file.exists() {
-        let text = fs::read_to_string(&tasks_file)
-            .with_context(|| format!("failed to read {}", tasks_file.display()))?;
-        json5::from_str::<serde_json::Value>(&text)
-            .with_context(|| format!("invalid JSON/JSON5 in {}", tasks_file.display()))?
-    } else {
-        json!([])
+    let JsonValue::Array(wanted_tasks) = &wanted else {
+        bail!("bundled resources/tasks.json must contain an array");
     };
 
-    let current_tasks = current
-        .as_array_mut()
+    let current_text = if tasks_file.exists() {
+        let text = fs::read_to_string(&tasks_file)
+            .with_context(|| format!("failed to read {}", tasks_file.display()))?;
+        if text.trim().is_empty() { "[]".to_string() } else { text }
+    } else {
+        "[]".to_string()
+    };
+
+    let root = CstRootNode::parse(&current_text, &Default::default())
+        .with_context(|| format!("invalid JSONC in {}", tasks_file.display()))?;
+    let current_tasks = root
+        .value()
+        .and_then(|value| value.as_array())
         .ok_or_else(|| anyhow!("{} must contain a JSON array", tasks_file.display()))?;
 
-    for wanted_task in wanted_tasks {
+    for wanted_task in wanted_tasks.iter() {
         let label = wanted_task
-            .get("label")
-            .and_then(|label| label.as_str())
+            .as_object_value()
+            .and_then(|task| task.get_string("label"))
+            .map(|label| label.as_ref())
             .ok_or_else(|| anyhow!("task in bundled resources/tasks.json is missing a label"))?;
 
-        if let Some(existing) = current_tasks.iter_mut().find(|task| {
-            task.get("label")
-                .and_then(|label| label.as_str())
-                .is_some_and(|existing_label| existing_label == label)
-        }) {
-            *existing = wanted_task.clone();
+        if let Some(existing) = current_tasks.elements().into_iter().find(|task| task_label(task).as_deref() == Some(label)) {
+            let index = existing.element_index().unwrap_or_else(|| current_tasks.elements().len());
+            existing.remove();
+            current_tasks.insert(index, json_value_to_cst(wanted_task.clone()));
         } else {
-            current_tasks.push(wanted_task.clone());
+            current_tasks.append(json_value_to_cst(wanted_task.clone()));
         }
     }
 
     fs::create_dir_all(zed_config_dir)
         .with_context(|| format!("failed to create {}", zed_config_dir.display()))?;
-    fs::write(&tasks_file, format!("{}\n", serde_json::to_string_pretty(&current)?))
+    backup_file_if_exists(&tasks_file)?;
+    fs::write(&tasks_file, root.to_string())
         .with_context(|| format!("failed to write {}", tasks_file.display()))?;
 
+    install_file_type_associations(&settings_file)?;
+
     println!("Installed zed-workspaces tasks to {}", tasks_file.display());
+    println!("Installed workspace file type associations to {}", settings_file.display());
+    Ok(())
+}
+
+fn install_file_type_associations(settings_file: &Path) -> Result<()> {
+    let text = if settings_file.exists() {
+        let text = fs::read_to_string(settings_file)
+            .with_context(|| format!("failed to read {}", settings_file.display()))?;
+        if text.trim().is_empty() { "{}".to_string() } else { text }
+    } else {
+        "{}".to_string()
+    };
+
+    let root = CstRootNode::parse(&text, &Default::default())
+        .with_context(|| format!("invalid JSONC in {}", settings_file.display()))?;
+    let settings = root.object_value_or_set();
+    let file_types = settings.object_value_or_set("file_types");
+    let jsonc = file_types.array_value_or_set("JSONC");
+
+    append_string_if_missing(&jsonc, "*.code-workspace");
+    append_string_if_missing(&jsonc, "*.zed-workspace");
+
+    if let Some(parent) = settings_file.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    backup_file_if_exists(settings_file)?;
+    fs::write(settings_file, root.to_string())
+        .with_context(|| format!("failed to write {}", settings_file.display()))?;
+    Ok(())
+}
+
+fn backup_file_if_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let hash = tenthash::hash(&bytes);
+    let hash = hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid file name: {}", path.display()))?;
+    let backup = path.with_file_name(format!("{file_name}.backup.{}", &hash[..16]));
+
+    if !backup.exists() {
+        fs::write(&backup, bytes)
+            .with_context(|| format!("failed to write backup {}", backup.display()))?;
+        println!("Created backup {}", backup.display());
+    }
+
     Ok(())
 }
 
@@ -251,14 +310,19 @@ fn create_workspace(mut args: Arguments) -> Result<()> {
         bail!("a workspace named {name:?} already exists");
     }
 
-    let mut content = serde_json::Map::new();
-    content.insert("$schema".to_string(), json!(ZED_WORKSPACE_SCHEMA));
-    content.insert(
-        "folders".to_string(),
-        dirs.into_iter().map(|dir| json!({ "path": dir })).collect(),
-    );
-    content.insert("settings".to_string(), json!({}));
-    fs::write(&workspace_file, serde_json::to_string_pretty(&content)?)
+    let content = CstInputValue::Object(vec![
+        ("$schema".to_string(), CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string())),
+        (
+            "folders".to_string(),
+            CstInputValue::Array(
+                dirs.into_iter()
+                    .map(|dir| CstInputValue::Object(vec![("path".to_string(), CstInputValue::String(dir))]))
+                    .collect(),
+            ),
+        ),
+        ("settings".to_string(), CstInputValue::Object(Vec::new())),
+    ]);
+    fs::write(&workspace_file, cst_to_string(content)?)
         .with_context(|| format!("failed to write {}", workspace_file.display()))?;
     println!("Workspace successfully created at {}", workspace_file.display());
     Ok(())
@@ -318,14 +382,15 @@ fn find_workspaces_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn open_zed_from_workspace(file: &Path, reuse: bool) -> Result<()> {
     let text = fs::read_to_string(file).with_context(|| format!("workspace file not found at {}", file.display()))?;
-    let value: serde_json::Value = json5::from_str(&text)
-        .with_context(|| format!("invalid JSON/JSON5 in {}", file.display()))?;
-    let folders = value["folders"].as_array().ok_or_else(|| anyhow!("invalid workspace: missing folders array"))?;
+    let value = parse_jsonc(&text)
+        .with_context(|| format!("invalid JSONC in {}", file.display()))?;
+    let object = value.as_object_value().ok_or_else(|| anyhow!("invalid workspace: root must be an object"))?;
+    let folders = object.get_array("folders").ok_or_else(|| anyhow!("invalid workspace: missing folders array"))?;
     let base = file.parent().unwrap_or_else(|| Path::new("."));
     let mut paths: Vec<PathBuf> = folders
         .iter()
-        .filter_map(|f| f.get("path").or_else(|| f.get("uri")).and_then(|v| v.as_str()))
-        .map(|p| base.join(p))
+        .filter_map(|f| f.as_object_value().and_then(|f| f.get_string("path").or_else(|| f.get_string("uri"))))
+        .map(|p| base.join(p.as_ref()))
         .collect();
 
     if is_zed_workspace_file(file) {
@@ -333,20 +398,24 @@ fn open_zed_from_workspace(file: &Path, reuse: bool) -> Result<()> {
         let zed_dir = settings_dir.join(".zed");
         fs::create_dir_all(&zed_dir)
             .with_context(|| format!("failed to create {}", zed_dir.display()))?;
-        let settings = value.get("settings").cloned().unwrap_or_else(|| json!({}));
+        let settings = object
+            .get("settings")
+            .cloned()
+            .map(json_value_to_cst)
+            .unwrap_or_else(|| CstInputValue::Object(Vec::new()));
         fs::write(
             zed_dir.join("settings.json"),
-            format!("{}\n", serde_json::to_string_pretty(&settings)?),
+            cst_to_string(settings)?,
         )
         .with_context(|| format!("failed to write {}", zed_dir.join("settings.json").display()))?;
 
-        if let Some(debug) = value.get("debug") {
-            if !debug.is_array() {
+        if let Some(debug) = object.get("debug") {
+            if !matches!(debug, JsonValue::Array(_)) {
                 bail!("invalid .zed-workspace: debug must be an array");
             }
             fs::write(
                 zed_dir.join("debug.json"),
-                format!("{}\n", serde_json::to_string_pretty(debug)?),
+                cst_to_string(json_value_to_cst(debug.clone()))?,
             )
             .with_context(|| format!("failed to write {}", zed_dir.join("debug.json").display()))?;
         }
@@ -424,4 +493,71 @@ fn prompt_many(message: &str, choices: &[String]) -> Result<Vec<String>> {
 
 fn display_arg(arg: std::ffi::OsString) -> String {
     arg.to_string_lossy().into_owned()
+}
+
+fn parse_jsonc(text: &str) -> Result<JsonValue<'_>> {
+    parse_to_value(text, &Default::default())?.ok_or_else(|| anyhow!("empty JSONC document"))
+}
+
+fn set_or_append_property(object: &CstObject, name: &str, value: JsonValue<'_>) {
+    let value = json_value_to_cst(value);
+    if let Some(prop) = object.get(name) {
+        prop.set_value(value);
+    } else {
+        object.append(name, value);
+    }
+}
+
+fn task_label(task: &CstNode) -> Option<String> {
+    task.as_object()?
+        .get("label")?
+        .value()?
+        .as_string_lit()?
+        .decoded_value()
+        .ok()
+}
+
+fn append_string_if_missing(array: &CstArray, value: &str) {
+    let exists = array.elements().into_iter().any(|element| {
+        element
+            .as_string_lit()
+            .and_then(|string| string.decoded_value().ok())
+            .is_some_and(|existing| existing == value)
+    });
+
+    if !exists {
+        array.append(CstInputValue::String(value.to_string()));
+    }
+}
+
+fn json_value_to_cst(value: JsonValue<'_>) -> CstInputValue {
+    match value {
+        JsonValue::Null => CstInputValue::Null,
+        JsonValue::Boolean(value) => CstInputValue::Bool(value),
+        JsonValue::Number(value) => CstInputValue::Number(value.to_string()),
+        JsonValue::String(value) => CstInputValue::String(value.into_owned()),
+        JsonValue::Array(values) => CstInputValue::Array(values.into_iter().map(json_value_to_cst).collect()),
+        JsonValue::Object(values) => CstInputValue::Object(
+            values.into_iter().map(|(key, value)| (key, json_value_to_cst(value))).collect(),
+        ),
+    }
+}
+
+fn cst_to_string(value: CstInputValue) -> Result<String> {
+    let root = CstRootNode::parse("null", &Default::default())?;
+    root.set_value(value);
+    Ok(format!("{}\n", root))
+}
+
+trait JsonValueExt<'a> {
+    fn as_object_value(&'a self) -> Option<&'a jsonc_parser::JsonObject<'a>>;
+}
+
+impl<'a> JsonValueExt<'a> for JsonValue<'a> {
+    fn as_object_value(&'a self) -> Option<&'a jsonc_parser::JsonObject<'a>> {
+        match self {
+            JsonValue::Object(object) => Some(object),
+            _ => None,
+        }
+    }
 }
