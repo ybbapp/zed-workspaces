@@ -119,6 +119,9 @@ fn update_from_settings(mut args: Arguments) -> Result<()> {
         set_or_append_property(&object, "debug", debug);
     }
 
+    let backup = backup_path_in_dir(&workspace_file, &generated_dir.join("backup"))?;
+    backup_file_to(&workspace_file, &backup)?;
+
     fs::write(&workspace_file, root.to_string())
         .with_context(|| format!("failed to write {}", workspace_file.display()))?;
 
