@@ -461,7 +461,7 @@ fn select_workspace_file_in_dir(root: &Path, dir: &Path) -> Result<PathBuf> {
     let files = find_workspaces_in_dir(dir)?;
     match files.as_slice() {
         [] => bail!(
-            "no .code-workspace files found directly in {}",
+            "no .zed-workspace or .code-workspace files found directly in {}",
             dir.display()
         ),
         [file] => Ok(file.clone()),
@@ -509,14 +509,23 @@ fn open_zed_from_workspace(file: &Path, reuse: bool) -> Result<()> {
         .get_array("folders")
         .ok_or_else(|| anyhow!("invalid workspace: missing folders array"))?;
     let base = file.parent().unwrap_or_else(|| Path::new("."));
-    let mut paths: Vec<PathBuf> = folders
-        .iter()
-        .filter_map(|f| {
-            f.as_object_value()
-                .and_then(|f| f.get_string("path").or_else(|| f.get_string("uri")))
-        })
-        .map(|p| base.join(p.as_ref()))
-        .collect();
+    let mut paths = Vec::new();
+    for folder in folders.iter() {
+        let Some(folder) = folder.as_object_value() else {
+            continue;
+        };
+
+        if let Some(path) = folder.get_string("path") {
+            paths.push(base.join(path.as_ref()));
+        } else if let Some(uri) = folder.get_string("uri") {
+            let uri = uri.as_ref();
+            if Path::new(uri).is_relative() {
+                paths.push(base.join(uri));
+            } else {
+                eprintln!("Skipping non-relative workspace uri: {uri}");
+            }
+        }
+    }
 
     if is_zed_workspace_file(file) {
         let settings_dir = base.join(".zed-workspace");
