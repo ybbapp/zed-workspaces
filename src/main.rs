@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use jsonc_parser::cst::{CstArray, CstInputValue, CstNode, CstObject, CstRootNode};
+use jsonc_parser::cst::{CstArray, CstInputValue, CstNode, CstRootNode};
 use jsonc_parser::{JsonValue, parse_to_value};
 use pico_args::Arguments;
 use std::{
@@ -24,10 +24,6 @@ USAGE:
   zed-workspaces install
     Install tasks and associate .zed-workspace files in your user-level zed settings.
 
-  zed-workspaces update-from-settings FILE
-    Updates a .zed-workspace file from decomposed .zed-workspace/.zed/[settings_file].json.
-    Mostly intended for use by the associated Zed task, not directly.
-
   zed-workspaces --help
     Print this help text
 
@@ -47,104 +43,7 @@ fn main() -> Result<()> {
         "create" => create_workspace(args),
         "open" => open_workspace(args),
         "install" => install(args),
-        "update-from-settings" => update_from_settings(args),
         other => bail!("unknown command {other:?}\n\n{HELP}"),
-    }
-}
-
-fn update_from_settings(mut args: Arguments) -> Result<()> {
-    let file = args
-        .opt_free_from_str::<String>()?
-        .ok_or_else(|| anyhow!("update-from-settings requires $ZED_FILE"))?;
-    ensure_no_args(args, "update-from-settings")?;
-
-    let file = env::current_dir()?.join(file);
-    let file = file
-        .canonicalize()
-        .with_context(|| format!("failed to resolve {}", file.display()))?;
-
-    let zed_dir = file
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", file.display()))?;
-    if zed_dir.file_name().and_then(|name| name.to_str()) != Some(".zed") {
-        bail!("{} is not inside a .zed directory", file.display());
-    }
-
-    let generated_dir = zed_dir
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", zed_dir.display()))?;
-    if generated_dir.file_name().and_then(|name| name.to_str()) != Some(".zed-workspace") {
-        bail!("{} is not inside .zed-workspace/.zed", file.display());
-    }
-
-    let workspace_dir = generated_dir
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", generated_dir.display()))?;
-    let workspace_file = find_single_zed_workspace_in_dir(workspace_dir)?;
-
-    let text = fs::read_to_string(&workspace_file)
-        .with_context(|| format!("failed to read {}", workspace_file.display()))?;
-    let root = CstRootNode::parse(&text, &Default::default())
-        .with_context(|| format!("invalid JSONC in {}", workspace_file.display()))?;
-    let object = root.object_value_or_set();
-
-    if let Some(schema) = object.get("$schema") {
-        schema.set_value(CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string()));
-    } else {
-        object.insert(
-            0,
-            "$schema",
-            CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string()),
-        );
-    }
-
-    let settings_file = zed_dir.join("settings.json");
-    if settings_file.exists() {
-        let settings_text = fs::read_to_string(&settings_file)
-            .with_context(|| format!("failed to read {}", settings_file.display()))?;
-        let settings = parse_jsonc(&settings_text)
-            .with_context(|| format!("invalid JSONC in {}", settings_file.display()))?;
-        set_or_append_property(&object, "settings", settings);
-    }
-
-    let debug_file = zed_dir.join("debug.json");
-    if debug_file.exists() {
-        let debug_text = fs::read_to_string(&debug_file)
-            .with_context(|| format!("failed to read {}", debug_file.display()))?;
-        let debug = parse_jsonc(&debug_text)
-            .with_context(|| format!("invalid JSONC in {}", debug_file.display()))?;
-        if !matches!(debug, JsonValue::Array(_)) {
-            bail!("{} must contain a JSON array", debug_file.display());
-        }
-        set_or_append_property(&object, "debug", debug);
-    }
-
-    let backup = backup_path_in_dir(&workspace_file, &generated_dir.join("backup"))?;
-    backup_file_to(&workspace_file, &backup)?;
-
-    fs::write(&workspace_file, root.to_string())
-        .with_context(|| format!("failed to write {}", workspace_file.display()))?;
-
-    println!("Updated {}", workspace_file.display());
-    Ok(())
-}
-
-fn find_single_zed_workspace_in_dir(dir: &Path) -> Result<PathBuf> {
-    let mut files = Vec::new();
-    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_file() && is_zed_workspace_file(&path) {
-            files.push(path);
-        }
-    }
-
-    match files.as_slice() {
-        [file] => Ok(file.clone()),
-        [] => bail!("no .zed-workspace file found in {}", dir.display()),
-        _ => bail!(
-            "multiple .zed-workspace files found in {}; cannot choose non-interactively",
-            dir.display()
-        ),
     }
 }
 
@@ -269,14 +168,6 @@ fn backup_path_next_to(path: &Path) -> Result<PathBuf> {
     Ok(path.with_file_name(format!("{file_name}.backup.{}", file_hash(path)?)))
 }
 
-fn backup_path_in_dir(path: &Path, backup_dir: &Path) -> Result<PathBuf> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("invalid file name: {}", path.display()))?;
-    Ok(backup_dir.join(format!("{file_name}.backup.{}", file_hash(path)?)))
-}
-
 fn file_hash(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let hash = tenthash::hash(&bytes);
@@ -298,31 +189,6 @@ fn backup_file_to(path: &Path, backup: &Path) -> Result<()> {
         fs::write(backup, bytes)
             .with_context(|| format!("failed to write backup {}", backup.display()))?;
         println!("Created backup {}", backup.display());
-    }
-
-    Ok(())
-}
-
-fn clobber_zed_dir(zed_dir: &Path, backup_dir: &Path) -> Result<()> {
-    if !zed_dir.exists() {
-        fs::create_dir_all(zed_dir)
-            .with_context(|| format!("failed to create {}", zed_dir.display()))?;
-        return Ok(());
-    }
-
-    for entry in
-        fs::read_dir(zed_dir).with_context(|| format!("failed to read {}", zed_dir.display()))?
-    {
-        let path = entry?.path();
-        if path.is_file() {
-            let backup = backup_path_in_dir(&path, backup_dir)?;
-            backup_file_to(&path, &backup)?;
-            fs::remove_file(&path)
-                .with_context(|| format!("failed to remove {}", path.display()))?;
-        } else if path.is_dir() {
-            fs::remove_dir_all(&path)
-                .with_context(|| format!("failed to remove {}", path.display()))?;
-        }
     }
 
     Ok(())
@@ -454,7 +320,7 @@ fn open_workspace(mut args: Arguments) -> Result<()> {
         file
     };
 
-    open_zed_from_workspace(&file, reuse)
+    open_workspace_file(&file, reuse)
 }
 
 fn select_workspace_file_in_dir(root: &Path, dir: &Path) -> Result<PathBuf> {
@@ -497,69 +363,8 @@ fn find_workspaces_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
     })
 }
 
-fn open_zed_from_workspace(file: &Path, reuse: bool) -> Result<()> {
-    let text = fs::read_to_string(file)
-        .with_context(|| format!("workspace file not found at {}", file.display()))?;
-    let value =
-        parse_jsonc(&text).with_context(|| format!("invalid JSONC in {}", file.display()))?;
-    let object = value
-        .as_object_value()
-        .ok_or_else(|| anyhow!("invalid workspace: root must be an object"))?;
-    let folders = object
-        .get_array("folders")
-        .ok_or_else(|| anyhow!("invalid workspace: missing folders array"))?;
-    let base = file.parent().unwrap_or_else(|| Path::new("."));
-    let mut paths = Vec::new();
-    for folder in folders.iter() {
-        let Some(folder) = folder.as_object_value() else {
-            continue;
-        };
-
-        if let Some(path) = folder.get_string("path") {
-            paths.push(base.join(path.as_ref()));
-        } else if let Some(uri) = folder.get_string("uri") {
-            let uri = uri.as_ref();
-            if Path::new(uri).is_relative() {
-                paths.push(base.join(uri));
-            } else {
-                eprintln!("Skipping non-relative workspace uri: {uri}");
-            }
-        }
-    }
-
-    if is_zed_workspace_file(file) {
-        let settings_dir = base.join(".zed-workspace");
-        let zed_dir = settings_dir.join(".zed");
-        let backup_dir = settings_dir.join("backup");
-
-        clobber_zed_dir(&zed_dir, &backup_dir)?;
-
-        if let Some(settings) = object.get("settings") {
-            fs::write(
-                zed_dir.join("settings.json"),
-                cst_to_string(json_value_to_cst(settings.clone()))?,
-            )
-            .with_context(|| {
-                format!(
-                    "failed to write {}",
-                    zed_dir.join("settings.json").display()
-                )
-            })?;
-        }
-
-        if let Some(debug) = object.get("debug") {
-            if !matches!(debug, JsonValue::Array(_)) {
-                bail!("invalid .zed-workspace: debug must be an array");
-            }
-            fs::write(
-                zed_dir.join("debug.json"),
-                cst_to_string(json_value_to_cst(debug.clone()))?,
-            )
-            .with_context(|| format!("failed to write {}", zed_dir.join("debug.json").display()))?;
-        }
-
-        paths.push(settings_dir);
-    }
+fn open_workspace_file(file: &Path, reuse: bool) -> Result<()> {
+    let paths = workspace_folder_paths(file)?;
 
     if paths.is_empty() {
         bail!("no valid folders found in workspace");
@@ -571,6 +376,39 @@ fn open_zed_from_workspace(file: &Path, reuse: bool) -> Result<()> {
     cmd.arg(if reuse { "--reuse" } else { "--new" });
     cmd.spawn().context("failed to start `zed`")?;
     Ok(())
+}
+
+fn workspace_folder_paths(file: &Path) -> Result<Vec<PathBuf>> {
+    let text = fs::read_to_string(file)
+        .with_context(|| format!("workspace file not found at {}", file.display()))?;
+    let value =
+        parse_jsonc(&text).with_context(|| format!("invalid JSONC in {}", file.display()))?;
+    let object = value
+        .as_object_value()
+        .ok_or_else(|| anyhow!("invalid workspace: root must be an object"))?;
+    let folders = object
+        .get_array("folders")
+        .ok_or_else(|| anyhow!("invalid workspace: missing folders array"))?;
+    let base = file.parent().unwrap_or_else(|| Path::new("."));
+    Ok(folders
+        .iter()
+        .filter_map(|folder| workspace_folder_path(folder.as_object_value()?, base))
+        .collect())
+}
+
+fn workspace_folder_path(folder: &jsonc_parser::JsonObject<'_>, base: &Path) -> Option<PathBuf> {
+    if let Some(path) = folder.get_string("path") {
+        return Some(base.join(path.as_ref()));
+    }
+
+    let uri = folder.get_string("uri")?;
+    let uri = uri.as_ref();
+    if Path::new(uri).is_relative() {
+        Some(base.join(uri))
+    } else {
+        eprintln!("Skipping non-relative workspace uri: {uri}");
+        None
+    }
 }
 
 fn is_zed_workspace_file(path: &Path) -> bool {
@@ -661,15 +499,6 @@ fn ensure_no_args(args: Arguments, command: &str) -> Result<()> {
 
 fn parse_jsonc(text: &str) -> Result<JsonValue<'_>> {
     parse_to_value(text, &Default::default())?.ok_or_else(|| anyhow!("empty JSONC document"))
-}
-
-fn set_or_append_property(object: &CstObject, name: &str, value: JsonValue<'_>) {
-    let value = json_value_to_cst(value);
-    if let Some(prop) = object.get(name) {
-        prop.set_value(value);
-    } else {
-        object.append(name, value);
-    }
 }
 
 fn task_label(task: &CstNode) -> Option<String> {

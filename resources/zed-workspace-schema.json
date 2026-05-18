@@ -18,15 +18,6 @@
         ],
         "additionalProperties": true
       }
-    },
-    "settings": {
-      "$ref": "zed://schemas/settings"
-    },
-    "debug": {
-      "type": "array",
-      "items": {
-        "$ref": "zed://schemas/debug"
-      }
     }
   },
   "required": ["folders"],

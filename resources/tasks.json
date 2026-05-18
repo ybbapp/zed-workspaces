@@ -19,12 +19,5 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always"
-  },
-  {
-    "label": "zed-workspaces: update workspace from settings",
-    "command": "zed-workspaces update-from-settings \"$ZED_FILE\"",
-    "use_new_terminal": false,
-    "allow_concurrent_runs": false,
-    "reveal": "always"
   }
 ]
