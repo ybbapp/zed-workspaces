@@ -364,13 +364,18 @@ fn find_workspaces_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn open_workspace_file(file: &Path, reuse: bool) -> Result<()> {
-    let paths = workspace_folder_paths(file)?;
+    let mut paths = workspace_folder_paths(file)?;
 
     if paths.is_empty() {
         bail!("no valid folders found in workspace");
     }
 
-    println!("Opening {} folders in Zed...", paths.len());
+    paths.push(file.to_path_buf());
+
+    println!(
+        "Opening {} folders and workspace file in Zed...",
+        paths.len() - 1
+    );
     let mut cmd = Command::new("zed");
     cmd.args(&paths);
     cmd.arg(if reuse { "--reuse" } else { "--new" });
