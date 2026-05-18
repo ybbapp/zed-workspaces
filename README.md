@@ -1,6 +1,6 @@
 # zed-workspaces
 
-Tiny CLI for creating and opening `.zed-workspace` files in Zed.
+Tiny CLI for creating and opening `.code-workspace` and `.zed-workspace` files in Zed.
 
 ## Install
 
@@ -50,7 +50,7 @@ zed-workspaces open .
 
 When opening a directory, it looks for `.zed-workspace` files directly inside that directory. If none exist, it falls back to `.code-workspace` files.
 
-`.zed-workspace` files use the `.code-workspace` shape, but `settings` are Zed settings. On open, `settings` are written to `.zed-workspace/.zed/settings.json`; optional `debug` is written to `.zed-workspace/.zed/debug.json`.
+`.zed-workspace` files use the `.code-workspace` shape, but `settings` are Zed settings. On open, `settings` are written to `.zed-workspace/.zed/settings.json`; optional `debug` is written to `.zed-workspace/.zed/debug.json`. See schema in [`resources/zed-workspace-schema.json`](./resources/zed-workspace-schema.json).
 
 ### Install Zed tasks
 
