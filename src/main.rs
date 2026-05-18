@@ -1,10 +1,9 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use jsonc_parser::cst::{CstArray, CstInputValue, CstNode, CstObject, CstRootNode};
-use jsonc_parser::{parse_to_value, JsonValue};
+use jsonc_parser::{JsonValue, parse_to_value};
 use pico_args::Arguments;
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -34,8 +33,7 @@ USAGE:
 
 "#;
 
-const ZED_WORKSPACE_SCHEMA: &str =
-    "https://raw.githubusercontent.com/fu5ha/zed-workspaces/main/resources/zed-workspace-schema.json";
+const ZED_WORKSPACE_SCHEMA: &str = "https://raw.githubusercontent.com/fu5ha/zed-workspaces/main/resources/zed-workspace-schema.json";
 
 fn main() -> Result<()> {
     let mut args = Arguments::from_env();
@@ -48,7 +46,7 @@ fn main() -> Result<()> {
     match command.as_str() {
         "create" => create_workspace(args),
         "open" => open_workspace(args),
-        "install" => install(),
+        "install" => install(args),
         "update-from-settings" => update_from_settings(args),
         other => bail!("unknown command {other:?}\n\n{HELP}"),
     }
@@ -58,8 +56,12 @@ fn update_from_settings(mut args: Arguments) -> Result<()> {
     let file = args
         .opt_free_from_str::<String>()?
         .ok_or_else(|| anyhow!("update-from-settings requires $ZED_FILE"))?;
+    ensure_no_args(args, "update-from-settings")?;
+
     let file = env::current_dir()?.join(file);
-    let file = file.canonicalize().with_context(|| format!("failed to resolve {}", file.display()))?;
+    let file = file
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", file.display()))?;
 
     let zed_dir = file
         .parent()
@@ -89,7 +91,11 @@ fn update_from_settings(mut args: Arguments) -> Result<()> {
     if let Some(schema) = object.get("$schema") {
         schema.set_value(CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string()));
     } else {
-        object.insert(0, "$schema", CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string()));
+        object.insert(
+            0,
+            "$schema",
+            CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string()),
+        );
     }
 
     let settings_file = zed_dir.join("settings.json");
@@ -114,7 +120,7 @@ fn update_from_settings(mut args: Arguments) -> Result<()> {
     }
 
     fs::write(&workspace_file, root.to_string())
-    .with_context(|| format!("failed to write {}", workspace_file.display()))?;
+        .with_context(|| format!("failed to write {}", workspace_file.display()))?;
 
     println!("Updated {}", workspace_file.display());
     Ok(())
@@ -132,11 +138,16 @@ fn find_single_zed_workspace_in_dir(dir: &Path) -> Result<PathBuf> {
     match files.as_slice() {
         [file] => Ok(file.clone()),
         [] => bail!("no .zed-workspace file found in {}", dir.display()),
-        _ => bail!("multiple .zed-workspace files found in {}; cannot choose non-interactively", dir.display()),
+        _ => bail!(
+            "multiple .zed-workspace files found in {}; cannot choose non-interactively",
+            dir.display()
+        ),
     }
 }
 
-fn install() -> Result<()> {
+fn install(args: Arguments) -> Result<()> {
+    ensure_no_args(args, "install")?;
+
     let settings_file = find_zed_settings_file()?;
     let zed_config_dir = settings_file
         .parent()
@@ -152,7 +163,11 @@ fn install() -> Result<()> {
     let current_text = if tasks_file.exists() {
         let text = fs::read_to_string(&tasks_file)
             .with_context(|| format!("failed to read {}", tasks_file.display()))?;
-        if text.trim().is_empty() { "[]".to_string() } else { text }
+        if text.trim().is_empty() {
+            "[]".to_string()
+        } else {
+            text
+        }
     } else {
         "[]".to_string()
     };
@@ -171,8 +186,14 @@ fn install() -> Result<()> {
             .map(|label| label.as_ref())
             .ok_or_else(|| anyhow!("task in bundled resources/tasks.json is missing a label"))?;
 
-        if let Some(existing) = current_tasks.elements().into_iter().find(|task| task_label(task).as_deref() == Some(label)) {
-            let index = existing.element_index().unwrap_or_else(|| current_tasks.elements().len());
+        if let Some(existing) = current_tasks
+            .elements()
+            .into_iter()
+            .find(|task| task_label(task).as_deref() == Some(label))
+        {
+            let index = existing
+                .element_index()
+                .unwrap_or_else(|| current_tasks.elements().len());
             existing.remove();
             current_tasks.insert(index, json_value_to_cst(wanted_task.clone()));
         } else {
@@ -189,7 +210,10 @@ fn install() -> Result<()> {
     install_file_type_associations(&settings_file)?;
 
     println!("Installed zed-workspaces tasks to {}", tasks_file.display());
-    println!("Installed workspace file type associations to {}", settings_file.display());
+    println!(
+        "Installed workspace file type associations to {}",
+        settings_file.display()
+    );
     Ok(())
 }
 
@@ -197,7 +221,11 @@ fn install_file_type_associations(settings_file: &Path) -> Result<()> {
     let text = if settings_file.exists() {
         let text = fs::read_to_string(settings_file)
             .with_context(|| format!("failed to read {}", settings_file.display()))?;
-        if text.trim().is_empty() { "{}".to_string() } else { text }
+        if text.trim().is_empty() {
+            "{}".to_string()
+        } else {
+            text
+        }
     } else {
         "{}".to_string()
     };
@@ -226,22 +254,72 @@ fn backup_file_if_exists(path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let hash = tenthash::hash(&bytes);
-    let hash = hash
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let backup = backup_path_next_to(path)?;
+    backup_file_to(path, &backup)
+}
+
+fn backup_path_next_to(path: &Path) -> Result<PathBuf> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("invalid file name: {}", path.display()))?;
-    let backup = path.with_file_name(format!("{file_name}.backup.{}", &hash[..16]));
+    Ok(path.with_file_name(format!("{file_name}.backup.{}", file_hash(path)?)))
+}
+
+fn backup_path_in_dir(path: &Path, backup_dir: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid file name: {}", path.display()))?;
+    Ok(backup_dir.join(format!("{file_name}.backup.{}", file_hash(path)?)))
+}
+
+fn file_hash(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let hash = tenthash::hash(&bytes);
+    Ok(hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()[..16]
+        .to_string())
+}
+
+fn backup_file_to(path: &Path, backup: &Path) -> Result<()> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
 
     if !backup.exists() {
-        fs::write(&backup, bytes)
+        if let Some(parent) = backup.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(backup, bytes)
             .with_context(|| format!("failed to write backup {}", backup.display()))?;
         println!("Created backup {}", backup.display());
+    }
+
+    Ok(())
+}
+
+fn clobber_zed_dir(zed_dir: &Path, backup_dir: &Path) -> Result<()> {
+    if !zed_dir.exists() {
+        fs::create_dir_all(zed_dir)
+            .with_context(|| format!("failed to create {}", zed_dir.display()))?;
+        return Ok(());
+    }
+
+    for entry in
+        fs::read_dir(zed_dir).with_context(|| format!("failed to read {}", zed_dir.display()))?
+    {
+        let path = entry?.path();
+        if path.is_file() {
+            let backup = backup_path_in_dir(&path, backup_dir)?;
+            backup_file_to(&path, &backup)?;
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        } else if path.is_dir() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
     }
 
     Ok(())
@@ -276,10 +354,19 @@ fn zed_settings_candidates() -> Vec<PathBuf> {
         }
     } else {
         if let Some(xdg_config_home) = env::var_os("XDG_CONFIG_HOME") {
-            candidates.push(PathBuf::from(xdg_config_home).join("zed").join("settings.json"));
+            candidates.push(
+                PathBuf::from(xdg_config_home)
+                    .join("zed")
+                    .join("settings.json"),
+            );
         }
         if let Some(home) = env::var_os("HOME") {
-            candidates.push(PathBuf::from(home).join(".config").join("zed").join("settings.json"));
+            candidates.push(
+                PathBuf::from(home)
+                    .join(".config")
+                    .join("zed")
+                    .join("settings.json"),
+            );
         }
     }
 
@@ -294,7 +381,15 @@ fn create_workspace(mut args: Arguments) -> Result<()> {
     };
     let name = validate_workspace_name(&name)?;
 
-    let mut dirs: Vec<String> = args.finish().into_iter().map(display_arg).collect();
+    let mut dirs: Vec<String> = args
+        .finish()
+        .into_iter()
+        .map(|arg| display_arg(&arg))
+        .collect();
+    if let Some(arg) = dirs.iter().find(|arg| arg.starts_with('-')) {
+        bail!("unexpected argument for create: {arg}");
+    }
+
     if dirs.is_empty() {
         dirs = prompt_many(
             "Select directories to include in the new workspace",
@@ -311,20 +406,30 @@ fn create_workspace(mut args: Arguments) -> Result<()> {
     }
 
     let content = CstInputValue::Object(vec![
-        ("$schema".to_string(), CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string())),
+        (
+            "$schema".to_string(),
+            CstInputValue::String(ZED_WORKSPACE_SCHEMA.to_string()),
+        ),
         (
             "folders".to_string(),
             CstInputValue::Array(
                 dirs.into_iter()
-                    .map(|dir| CstInputValue::Object(vec![("path".to_string(), CstInputValue::String(dir))]))
+                    .map(|dir| {
+                        CstInputValue::Object(vec![(
+                            "path".to_string(),
+                            CstInputValue::String(dir),
+                        )])
+                    })
                     .collect(),
             ),
         ),
-        ("settings".to_string(), CstInputValue::Object(Vec::new())),
     ]);
     fs::write(&workspace_file, cst_to_string(content)?)
         .with_context(|| format!("failed to write {}", workspace_file.display()))?;
-    println!("Workspace successfully created at {}", workspace_file.display());
+    println!(
+        "Workspace successfully created at {}",
+        workspace_file.display()
+    );
     Ok(())
 }
 
@@ -332,6 +437,8 @@ fn open_workspace(mut args: Arguments) -> Result<()> {
     let root = env::current_dir()?;
     let reuse = args.contains("--reuse");
     let file = args.opt_free_from_str::<String>()?.map(PathBuf::from);
+    ensure_no_args(args, "open")?;
+
     let file = match file {
         Some(path) if path.is_absolute() => path,
         Some(path) => root.join(path),
@@ -350,7 +457,10 @@ fn open_workspace(mut args: Arguments) -> Result<()> {
 fn select_workspace_file_in_dir(root: &Path, dir: &Path) -> Result<PathBuf> {
     let files = find_workspaces_in_dir(dir)?;
     match files.as_slice() {
-        [] => bail!("no .code-workspace files found directly in {}", dir.display()),
+        [] => bail!(
+            "no .code-workspace files found directly in {}",
+            dir.display()
+        ),
         [file] => Ok(file.clone()),
         _ => {
             let choices: Vec<String> = files
@@ -377,37 +487,53 @@ fn find_workspaces_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
-    Ok(if zed_workspaces.is_empty() { code_workspaces } else { zed_workspaces })
+    Ok(if zed_workspaces.is_empty() {
+        code_workspaces
+    } else {
+        zed_workspaces
+    })
 }
 
 fn open_zed_from_workspace(file: &Path, reuse: bool) -> Result<()> {
-    let text = fs::read_to_string(file).with_context(|| format!("workspace file not found at {}", file.display()))?;
-    let value = parse_jsonc(&text)
-        .with_context(|| format!("invalid JSONC in {}", file.display()))?;
-    let object = value.as_object_value().ok_or_else(|| anyhow!("invalid workspace: root must be an object"))?;
-    let folders = object.get_array("folders").ok_or_else(|| anyhow!("invalid workspace: missing folders array"))?;
+    let text = fs::read_to_string(file)
+        .with_context(|| format!("workspace file not found at {}", file.display()))?;
+    let value =
+        parse_jsonc(&text).with_context(|| format!("invalid JSONC in {}", file.display()))?;
+    let object = value
+        .as_object_value()
+        .ok_or_else(|| anyhow!("invalid workspace: root must be an object"))?;
+    let folders = object
+        .get_array("folders")
+        .ok_or_else(|| anyhow!("invalid workspace: missing folders array"))?;
     let base = file.parent().unwrap_or_else(|| Path::new("."));
     let mut paths: Vec<PathBuf> = folders
         .iter()
-        .filter_map(|f| f.as_object_value().and_then(|f| f.get_string("path").or_else(|| f.get_string("uri"))))
+        .filter_map(|f| {
+            f.as_object_value()
+                .and_then(|f| f.get_string("path").or_else(|| f.get_string("uri")))
+        })
         .map(|p| base.join(p.as_ref()))
         .collect();
 
     if is_zed_workspace_file(file) {
         let settings_dir = base.join(".zed-workspace");
         let zed_dir = settings_dir.join(".zed");
-        fs::create_dir_all(&zed_dir)
-            .with_context(|| format!("failed to create {}", zed_dir.display()))?;
-        let settings = object
-            .get("settings")
-            .cloned()
-            .map(json_value_to_cst)
-            .unwrap_or_else(|| CstInputValue::Object(Vec::new()));
-        fs::write(
-            zed_dir.join("settings.json"),
-            cst_to_string(settings)?,
-        )
-        .with_context(|| format!("failed to write {}", zed_dir.join("settings.json").display()))?;
+        let backup_dir = settings_dir.join("backup");
+
+        clobber_zed_dir(&zed_dir, &backup_dir)?;
+
+        if let Some(settings) = object.get("settings") {
+            fs::write(
+                zed_dir.join("settings.json"),
+                cst_to_string(json_value_to_cst(settings.clone()))?,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to write {}",
+                    zed_dir.join("settings.json").display()
+                )
+            })?;
+        }
 
         if let Some(debug) = object.get("debug") {
             if !matches!(debug, JsonValue::Array(_)) {
@@ -475,24 +601,50 @@ fn prompt(message: &str) -> Result<String> {
 }
 
 fn prompt_one(message: &str, choices: &[String]) -> Result<String> {
-    if choices.is_empty() { bail!("no choices available"); }
-    for (i, choice) in choices.iter().enumerate() { println!("{}: {}", i + 1, choice); }
-    let n: usize = prompt(&format!("{message} [1-{}]: ", choices.len()))?.parse().context("invalid selection")?;
-    choices.get(n - 1).cloned().ok_or_else(|| anyhow!("selection out of range"))
+    if choices.is_empty() {
+        bail!("no choices available");
+    }
+    for (i, choice) in choices.iter().enumerate() {
+        println!("{}: {}", i + 1, choice);
+    }
+    let n: usize = prompt(&format!("{message} [1-{}]: ", choices.len()))?
+        .parse()
+        .context("invalid selection")?;
+    choices
+        .get(n - 1)
+        .cloned()
+        .ok_or_else(|| anyhow!("selection out of range"))
 }
 
 fn prompt_many(message: &str, choices: &[String]) -> Result<Vec<String>> {
-    if choices.is_empty() { bail!("no directories found in the current root"); }
-    for (i, choice) in choices.iter().enumerate() { println!("{}: {}", i + 1, choice); }
+    if choices.is_empty() {
+        bail!("no directories found in the current root");
+    }
+    for (i, choice) in choices.iter().enumerate() {
+        println!("{}: {}", i + 1, choice);
+    }
     let line = prompt(&format!("{message} (comma-separated numbers): "))?;
-    line.split(',').map(|part| {
-        let n: usize = part.trim().parse().context("invalid selection")?;
-        choices.get(n - 1).cloned().ok_or_else(|| anyhow!("selection out of range"))
-    }).collect()
+    line.split(',')
+        .map(|part| {
+            let n: usize = part.trim().parse().context("invalid selection")?;
+            choices
+                .get(n - 1)
+                .cloned()
+                .ok_or_else(|| anyhow!("selection out of range"))
+        })
+        .collect()
 }
 
-fn display_arg(arg: std::ffi::OsString) -> String {
+fn display_arg(arg: &std::ffi::OsString) -> String {
     arg.to_string_lossy().into_owned()
+}
+
+fn ensure_no_args(args: Arguments, command: &str) -> Result<()> {
+    let args = args.finish();
+    if let Some(arg) = args.first() {
+        bail!("unexpected argument for {command}: {}", display_arg(arg));
+    }
+    Ok(())
 }
 
 fn parse_jsonc(text: &str) -> Result<JsonValue<'_>> {
@@ -536,9 +688,14 @@ fn json_value_to_cst(value: JsonValue<'_>) -> CstInputValue {
         JsonValue::Boolean(value) => CstInputValue::Bool(value),
         JsonValue::Number(value) => CstInputValue::Number(value.to_string()),
         JsonValue::String(value) => CstInputValue::String(value.into_owned()),
-        JsonValue::Array(values) => CstInputValue::Array(values.into_iter().map(json_value_to_cst).collect()),
+        JsonValue::Array(values) => {
+            CstInputValue::Array(values.into_iter().map(json_value_to_cst).collect())
+        }
         JsonValue::Object(values) => CstInputValue::Object(
-            values.into_iter().map(|(key, value)| (key, json_value_to_cst(value))).collect(),
+            values
+                .into_iter()
+                .map(|(key, value)| (key, json_value_to_cst(value)))
+                .collect(),
         ),
     }
 }
