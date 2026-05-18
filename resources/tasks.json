@@ -1,0 +1,30 @@
+[
+  {
+    "label": "zed-workspaces: create",
+    "command": "zed-workspaces create",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "zed-workspaces: open (new window)",
+    "command": "zed-workspaces open",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "zed-workspaces: open (reuse window)",
+    "command": "zed-workspaces open --reuse",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "zed-workspaces: update workspace from settings",
+    "command": "zed-workspaces update-from-settings \"$ZED_FILE\"",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]
